@@ -10,6 +10,45 @@ The long-term goal is to evolve DocFast into an enterprise document-processing a
 
 ---
 
+## Table of Contents
+
+**Core design (original sections)**
+
+1. [Problem Statement](#1-problem-statement)
+2. [Core Concept](#2-core-concept)
+3. [Domain Scope](#3-domain-scope)
+4. [Document-Specific Schemas](#4-document-specific-schemas)
+5. [Document Schema vs Database Schema](#5-document-schema-vs-database-schema)
+6. [Schema Versioning](#6-schema-versioning)
+7. [Initial Processing Pipeline](#7-initial-processing-pipeline)
+8. [Synthetic Data](#8-synthetic-data)
+9. [Business Validation](#9-business-validation)
+10. [Job Concept](#10-job-concept)
+11. [Planned Job Lifecycle](#11-planned-job-lifecycle)
+12. [Planned Architecture](#12-planned-architecture)
+13. [Initial API Direction](#13-initial-api-direction)
+14. [Architectural Principles](#14-architectural-principles)
+15. [Future Scope](#15-future-scope)
+16. [AI Extension](#16-ai-extension)
+17. [Long-Term AI Architecture](#17-long-term-ai-architecture)
+18. [Final Evolution](#18-final-evolution)
+19. [Current V1 Scope](#19-current-v1-scope)
+20. [Initial Project Structure](#20-initial-project-structure)
+
+**New sections**
+
+21. [Error Model and Error Codes](#21-error-model-and-error-codes)
+22. [Configuration-Driven Validation Rules](#22-configuration-driven-validation-rules)
+23. [Getting Started](#23-getting-started)
+24. [V1 API (Proposed Minimal Surface)](#24-v1-api-proposed-minimal-surface)
+25. [Testing Strategy](#25-testing-strategy)
+26. [Security and Upload Safety](#26-security-and-upload-safety)
+27. [Engineering Standards and Tooling](#27-engineering-standards-and-tooling)
+28. [Additional Planned Features](#28-additional-planned-features)
+29. [AI Quality and Governance](#29-ai-quality-and-governance)
+
+---
+
 # 1. Problem Statement
 
 Generic file-upload systems are easy to build but provide little meaningful business logic.
@@ -379,6 +418,8 @@ Example:
 }
 ```
 
+See [Section 21](#21-error-model-and-error-codes) for the extended error model with stable error codes and severities.
+
 ---
 
 # 10. Job Concept
@@ -556,7 +597,7 @@ POST   /api/v1/jobs/{job_id}/retry
 GET /api/v1/jobs/{job_id}/result
 ```
 
-These endpoints are a target design, not all V1 requirements.
+These endpoints are a target design, not all V1 requirements. See [Section 24](#24-v1-api-proposed-minimal-surface) for the proposed minimal V1 surface.
 
 ---
 
@@ -1165,3 +1206,206 @@ DocFast/
 ```
 
 The architecture will evolve as the domain grows. We should avoid creating empty architecture folders before their responsibilities are understood.
+
+---
+
+# 21. Error Model and Error Codes
+
+Validation errors should be machine-readable so the frontend, tests, and later AI explanations can rely on them.
+
+## Error format
+
+```json
+{
+  "status": "FAILED",
+  "errors": [
+    {
+      "code": "RANGE_VIOLATION",
+      "severity": "ERROR",
+      "row": 18,
+      "column": "N1",
+      "value": 147.3,
+      "rule": "N1 must be within the configured range"
+    }
+  ]
+}
+```
+
+## Initial error codes
+
+```text
+MISSING_COLUMN
+TYPE_MISMATCH
+INVALID_DATE
+RANGE_VIOLATION
+DUPLICATE_RECORD
+MALFORMED_WORKBOOK
+INCONSISTENT_VALUES
+```
+
+## Severity levels
+
+```text
+ERROR     fails the document
+WARNING   flagged, but the document can still pass
+INFO      informational only
+```
+
+Severity prevents a single borderline value from failing an entire document when the domain does not require it.
+
+---
+
+# 22. Configuration-Driven Validation Rules
+
+Business limits should not be hardcoded in Python.
+
+Rules live in a configuration file (YAML or JSON), versioned together with the document schema.
+
+Illustrative shape (values are placeholders, not real engineering limits):
+
+```yaml
+document_type: ENGINE_MAINTENANCE_REPORT
+schema_version: "1.0"
+fields:
+  engine_serial:
+    type: string
+    required: true
+  n1_max:
+    type: float
+    required: true
+    range: { min: <configured>, max: <configured> }
+  inspection_date:
+    type: date
+    required: true
+```
+
+Benefits:
+
+- limits can change without code changes
+- rules are reviewable by domain engineers
+- prepares the system for the schema registry (V3)
+
+---
+
+# 23. Getting Started
+
+```bash
+# 1. Create and activate a virtual environment
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Run the development server
+uvicorn app.main:app --reload
+```
+
+Interactive API docs are available at `http://127.0.0.1:8000/docs`.
+
+Run the tests:
+
+```bash
+pytest
+```
+
+---
+
+# 24. V1 API (Proposed Minimal Surface)
+
+Section 13 describes the full target design. For V1, a much smaller surface is enough:
+
+```text
+GET    /health
+POST   /api/v1/documents/process     Upload an XLSX, receive the JSON result
+```
+
+The request is a multipart file upload. The response is either the structured JSON result (Section 7) or the error model (Section 21).
+
+Authentication, persistence, and job endpoints arrive in later versions.
+
+---
+
+# 25. Testing Strategy
+
+Testing relies on the synthetic datasets from Section 8.
+
+- **Unit tests:** individual validators and normalizers
+- **Golden-file tests:** each synthetic workbook has an expected JSON output that the pipeline must reproduce exactly
+- **Negative tests:** every invalid dataset must produce the expected error codes
+- **API tests:** FastAPI `TestClient` against the V1 endpoints
+- **Determinism check:** processing the same file twice yields identical output
+
+Tools: `pytest`, `httpx`/`TestClient`.
+
+---
+
+# 26. Security and Upload Safety
+
+File-processing services accept untrusted input. Even in V1:
+
+- enforce a maximum upload size
+- check file extension and MIME type
+- reject malformed or corrupted workbooks with `MALFORMED_WORKBOOK`
+- do not execute macros or external links inside workbooks
+- guard against oversized or decompression-bomb archives (XLSX is a zip file)
+- never trust the client-supplied filename for storage paths
+- deduplicate uploads using the file checksum
+
+Later: authentication, role-based access, rate limiting, secrets management, and data retention and deletion policy.
+
+---
+
+# 27. Engineering Standards and Tooling
+
+- **Formatting and linting:** ruff
+- **Type checking:** mypy
+- **Testing:** pytest
+- **Hooks:** pre-commit
+- **CI:** run lint, type check, and tests on every push (for example GitHub Actions)
+- **Containers:** Docker and docker-compose once PostgreSQL and Redis are introduced
+- **Migrations:** Alembic once PostgreSQL is introduced
+- **Logging:** structured logs with request IDs and, later, job IDs
+
+---
+
+# 28. Additional Planned Features
+
+Ideas beyond the original roadmap, to be adopted only when there is a concrete reason (Section 14):
+
+## Domain depth
+
+- cross-record checks (for example, flight hours must not decrease for the same engine serial)
+- unit handling and normalization (psi vs kPa, °C vs °F)
+- per-engine time-series storage, the foundation for anomaly detection
+- lineage: raw upload, parsed data, normalized data, and result, linked to schema and pipeline versions
+
+## Product features
+
+- web frontend for upload, job status, and error viewing
+- downloadable validation reports (Excel/PDF)
+- dashboards: pass/fail rates and most common rule violations
+- roles and permissions (uploader, reviewer, admin)
+- audit trail UI for traceability
+- webhooks or notifications on job completion
+- downloadable XLSX templates per schema version
+
+## Production concerns
+
+- observability (metrics, tracing)
+- backups and disaster recovery
+- multi-tenancy if several organizations are served
+
+---
+
+# 29. AI Quality and Governance
+
+To keep the AI layer trustworthy (Section 16):
+
+- **Evaluation set:** a labeled set of messy headers (`ESN`, `N2 Max RPM`) to measure schema-mapping accuracy before and after any prompt or model change
+- **Versioning:** prompt and model versions recorded on jobs, like `pipeline_version`
+- **Structured outputs:** LLM responses constrained to a JSON schema and parsed defensively
+- **Guardrails:** every AI output passes through deterministic validation before it affects data
+- **Confidence thresholds:** configurable auto-accept and human-review thresholds
+- **Cost and latency tracking:** per feature, with caching where safe
+- **Explainability first:** plain-language explanations of validation failures (built on error codes) are the safest first AI feature, since they cannot change data
